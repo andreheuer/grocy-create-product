@@ -1,24 +1,34 @@
 from ast import While
+from email import header
 from urllib import parse
 import json
+from wsgiref.headers import Headers
 import requests
+from requests import Response
 import sys
 import re
 import base64
 
 GROCY_URL = "https://link.to.grocy/api/"
+GROCY_API_KEY = "XXXXXXXXXXX"
 DEFAULT_GROUP = "8"
 DEFAULT_LOCATION = "3"
+CONTINUOUS_MODE=False
 
+headers = {'GROCY-API-KEY': GROCY_API_KEY}
 
 def get_barcode() -> str:
+    if len(sys.argv) > 1:
+        return sys.argv[1]
+
     while(True):
         barcode = input("Barcode: ").strip()
         if barcode == "":
+            print("No barcode entered - exiting")
             sys.exit(0)
         # Check if barcode exist in grocy
-        bc_exist = requests.get(
-            GROCY_URL + "stock/products/by-barcode/" + barcode)
+        bc_exist = call_grocy(
+            "stock/products/by-barcode/" + barcode)
         if bc_exist.status_code == 400:
             return barcode
             break
@@ -26,6 +36,11 @@ def get_barcode() -> str:
             existing_product = json.loads(bc_exist.content)
             print("Barcode already exists in Grocy for product",
                   existing_product["product"]["name"], "with id", existing_product["product"]["id"])
+
+
+def call_grocy(call_url) -> Response:
+    return requests.get(
+        GROCY_URL + call_url, headers=headers)
 
 
 def get_quantities(qu_str):
@@ -53,8 +68,8 @@ def set_product_name(default_product_name) -> None:
         query = parse.quote_plus("query[]") + "=name=" + \
             parse.quote_plus(new_product["name"])
 
-        product_exist = requests.get(
-            GROCY_URL + "objects/products?" + query)
+        product_exist = call_grocy(
+            "objects/products?" + query)
         if product_exist.status_code == 200:
             existing_product = json.loads(product_exist.content)
             if len(existing_product) == 0:
@@ -70,10 +85,10 @@ def add_picture_to_product(id, file_url) -> None:
     image_name64 = base64.b64encode((str(id) + ".jpg").encode("utf-8"))
     image_name = str(image_name64, "utf-8")
     req = requests.put(
-        GROCY_URL + 'files/productpictures/' + image_name, data=response.content)
+        GROCY_URL + 'files/productpictures/' + image_name, data=response.content, headers=headers)
     if(req.status_code < 400):
         req = requests.put(GROCY_URL + 'objects/products/' +
-                           str(id), data={"picture_file_name": str(id) + ".jpg"})
+                           str(id), data={"picture_file_name": str(id) + ".jpg"}, headers=headers)
 
 
 def add_calories(productData) -> None:
@@ -96,6 +111,7 @@ def add_product_group() -> None:
         prompt = prompt + " [" + groups[DEFAULT_GROUP] + "]"
     group_id = product_group = input(prompt + ": ") or DEFAULT_GROUP
     if not group_id:
+        print("No group id entered - exiting")
         sys.exit(2)
     new_product["product_group_id"] = group_id
 
@@ -119,7 +135,7 @@ def add_quantities(productData) -> None:
     qu_id = ""
     qu_value = ""
 
-    if "quantity" in productData["product"]:
+    if "product" in productData and "quantity" in productData["product"]:
         qu_f = productData["product"]["quantity"]
         result = get_quantities(qu_f)
         qu_value = result[0]
@@ -129,6 +145,7 @@ def add_quantities(productData) -> None:
         qu_f = input(
             "Enter quantity and unit of scanned barcode product (e.g. 1000g): ") or ""
         if not qu_f:
+            print("No quantitiy id entered - exiting")
             sys.exit(2)
         result = get_quantities(qu_f)
         qu_value = result[0]
@@ -152,24 +169,23 @@ def add_quantities(productData) -> None:
     print("")
     qu_f = input(
         "Enter purchase quantity unit [" + quantities[qu_id] + "]: ") or quantities[qu_id]
-    result = get_quantities(qu_f)
-    new_product["qu_id_purchase"] = result[1]
+    new_product["qu_id_purchase"] = qu_f
 
 
 def load_grocy_data():
-    locations_json = requests.get(GROCY_URL + "objects/locations")
+    locations_json = call_grocy("objects/locations")
     if locations_json.status_code < 400:
         locations_parsed = json.loads(locations_json.content)
         for location in locations_parsed:
             locations[location["id"]] = location["name"]
 
-    qu_json = requests.get(GROCY_URL + "objects/quantity_units")
+    qu_json = call_grocy("objects/quantity_units")
     if qu_json.status_code < 400:
         qu_parsed = json.loads(qu_json.content)
         for qu in qu_parsed:
             quantities[qu["id"]] = qu["name"]
 
-    groups_json = requests.get(GROCY_URL + "objects/product_groups")
+    groups_json = call_grocy("objects/product_groups")
     if groups_json.status_code < 400:
         groups_parsed = json.loads(groups_json.content)
         for group in groups_parsed:
@@ -182,6 +198,7 @@ def create_new_product():
     off_response = requests.get(
         "https://de.openfoodfacts.org/api/v0/product/" + new_barcode["barcode"] + ".json")
     if off_response.status_code >= 400:
+        print("Received invalid response from OpenFoodFacts when creating new product:",off_response.reason,"- exiting")
         sys.exit(1)
     product = json.loads(off_response.content)
     def_product = ""
@@ -190,6 +207,7 @@ def create_new_product():
             "https://de.openbeautyfacts.org/api/v0/product/" + new_barcode["barcode"] + ".json")
         product = json.loads(obf_response.content)
         if obf_response.status_code >= 400:
+            print("Received invalid response from OpenBeautyFacts when creating new product:",off_response.reason,"- exiting")
             sys.exit(1)
         if product["status"] != 0:
             if "product_name" in product["product"]:
@@ -224,12 +242,12 @@ def create_new_product():
         GROCY_URL + "objects/product_barcodes", data=new_barcode)
     if create_response.status_code >= 400:
         print("Error creating barcode in Grocy: ",
-              create_response.status_code, ": ", create_response.content)
+              create_response.status_code, ": ", create_response.content,"- exiting")        
         sys.exit(3)
     print("New product created with id: ", new_product_id)
 
     # Add image
-    if("image_url" in product["product"] and product["product"]["image_url"]):
+    if("product" in product and "image_url" in product["product"] and product["product"]["image_url"]):
         add_picture_to_product(new_product_id, product["product"]["image_url"])
 
 
@@ -245,3 +263,5 @@ load_grocy_data()
 # Main loop to create new products
 while(True):
     create_new_product()
+    if not CONTINUOUS_MODE:
+        break
